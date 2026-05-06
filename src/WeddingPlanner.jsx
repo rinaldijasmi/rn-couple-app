@@ -1,14 +1,19 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { 
   Calendar, CheckSquare, Wallet, Users, Store, 
   Plus, Trash2, Check, Clock, MapPin, Phone,
   TrendingUp, TrendingDown, Home, Search,
-  AlertCircle, Star, ChevronDown, ChevronUp, Target, Edit2
+  AlertCircle, Star, ChevronDown, ChevronUp, Target, Edit2,
+  Cloud, CloudOff, Loader2
 } from "lucide-react";
+import { db } from "./firebase";
+import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 export default function WeddingPlanner() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [loading, setLoading] = useState(true);
+  const [syncStatus, setSyncStatus] = useState("connecting");
+  const isInitialLoad = useRef(true);
   
   const [weddingInfo, setWeddingInfo] = useState({
     weddingDate: "",
@@ -55,40 +60,60 @@ export default function WeddingPlanner() {
   };
 
   useEffect(() => {
-    const loadData = async () => {
-      try {
-        const keys = ["weddingInfoV2", "todos", "events", "transactions", "guests", "vendors", "wishlistVendors"];
-        const results = await Promise.all(
-          keys.map(async (key) => {
-            try {
-              const r = await window.storage.get(key);
-              return r ? JSON.parse(r.value) : null;
-            } catch {
-              return null;
-            }
-          })
-        );
-        if (results[0]) setWeddingInfo(results[0]);
-        if (results[1]) setTodos(results[1]);
-        if (results[2]) setEvents(results[2]);
-        if (results[3]) setTransactions(results[3].map(t => ({ ...t, category: migrateCategory(t.category) })));
-        if (results[4]) setGuests(results[4]);
-        if (results[5]) setVendors(results[5].map(v => ({ ...v, category: migrateCategory(v.category) })));
-        if (results[6]) setWishlistVendors(results[6].map(w => ({ ...w, category: migrateCategory(w.category) })));
-      } catch (e) {
-        console.error("Load error:", e);
-      } finally {
+    const docRef = doc(db, "wedding", "main");
+    
+    const unsubscribe = onSnapshot(docRef, 
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          if (data.weddingInfo) setWeddingInfo(data.weddingInfo);
+          if (data.todos) setTodos(data.todos);
+          if (data.events) setEvents(data.events);
+          if (data.transactions) setTransactions(data.transactions.map(t => ({ ...t, category: migrateCategory(t.category) })));
+          if (data.guests) setGuests(data.guests);
+          if (data.vendors) setVendors(data.vendors.map(v => ({ ...v, category: migrateCategory(v.category) })));
+          if (data.wishlistVendors) setWishlistVendors(data.wishlistVendors.map(w => ({ ...w, category: migrateCategory(w.category) })));
+        }
+        setSyncStatus("synced");
+        setLoading(false);
+        isInitialLoad.current = false;
+      },
+      (error) => {
+        console.error("Firestore error:", error);
+        setSyncStatus("error");
         setLoading(false);
       }
-    };
-    loadData();
+    );
+    
+    return () => unsubscribe();
   }, []);
 
-  const saveData = async (key, data) => {
+  const saveToFirestore = async (updates) => {
+    if (isInitialLoad.current) return;
+    setSyncStatus("saving");
     try {
-      await window.storage.set(key, JSON.stringify(data));
+      const docRef = doc(db, "wedding", "main");
+      await setDoc(docRef, updates, { merge: true });
+      setSyncStatus("synced");
     } catch (e) {
       console.error("Save error:", e);
+      setSyncStatus("error");
+    }
+  };
+
+  const saveData = (key, data) => {
+    const fieldMap = {
+      "weddingInfoV2": "weddingInfo",
+      "todos": "todos",
+      "events": "events",
+      "transactions": "transactions",
+      "guests": "guests",
+      "vendors": "vendors",
+      "wishlistVendors": "wishlistVendors"
+    };
+    const field = fieldMap[key];
+    if (field) {
+      saveToFirestore({ [field]: data });
     }
   };
 
@@ -383,7 +408,10 @@ export default function WeddingPlanner() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-stone-50">
-        <p className="text-stone-400 text-sm tracking-widest uppercase">Memuat...</p>
+        <div className="text-center">
+          <Loader2 className="w-6 h-6 text-stone-400 animate-spin mx-auto mb-4" />
+          <p className="text-stone-400 text-sm tracking-widest uppercase">Menghubungkan...</p>
+        </div>
       </div>
     );
   }
@@ -434,7 +462,21 @@ export default function WeddingPlanner() {
         }
       `}</style>
 
-      <header className="border-b border-stone-200 bg-stone-50">
+      <header className="border-b border-stone-200 bg-stone-50 relative">
+        <div className="absolute top-3 right-4 flex items-center gap-1.5 text-xs">
+          {syncStatus === "synced" && (
+            <><Cloud className="w-3 h-3 text-emerald-600" /><span className="text-stone-500 hidden sm:inline">Tersinkron</span></>
+          )}
+          {syncStatus === "saving" && (
+            <><Loader2 className="w-3 h-3 text-stone-500 animate-spin" /><span className="text-stone-500 hidden sm:inline">Menyimpan...</span></>
+          )}
+          {syncStatus === "connecting" && (
+            <><Loader2 className="w-3 h-3 text-stone-500 animate-spin" /><span className="text-stone-500 hidden sm:inline">Menghubungkan...</span></>
+          )}
+          {syncStatus === "error" && (
+            <><CloudOff className="w-3 h-3 text-red-600" /><span className="text-red-600 hidden sm:inline">Gagal sync</span></>
+          )}
+        </div>
         <div className="max-w-5xl mx-auto px-6 py-10 sm:py-14 text-center">
           <p className="text-xs tracking-[0.3em] uppercase text-stone-500 mb-4">Wedding Planner</p>
           <h1 className="serif text-3xl sm:text-5xl font-light text-stone-900 italic">
