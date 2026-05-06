@@ -4,7 +4,7 @@ import {
   Plus, Trash2, Check, Clock, MapPin, Phone,
   TrendingUp, TrendingDown, Home, Search,
   AlertCircle, Star, ChevronDown, ChevronUp, Target, Edit2,
-  Cloud, CloudOff, Loader2
+  Cloud, CloudOff, Loader2, LineChart, PiggyBank
 } from "lucide-react";
 import { db } from "./firebase";
 import { doc, onSnapshot, setDoc } from "firebase/firestore";
@@ -51,6 +51,14 @@ export default function WeddingPlanner() {
   const [wishlistFilter, setWishlistFilter] = useState("Semua");
   const [expandedWishlist, setExpandedWishlist] = useState(null);
 
+  // Financial Planning State
+  const [incomeSources, setIncomeSources] = useState([]);
+  const [newIncomeSource, setNewIncomeSource] = useState({ name: "", amount: "", startMonth: "" });
+  const [showIncomeForm, setShowIncomeForm] = useState(false);
+  const [editingIncomeId, setEditingIncomeId] = useState(null);
+  const [targetSourceChoice, setTargetSourceChoice] = useState("budget"); // "budget" | "vendors" | "custom"
+  const [customTarget, setCustomTarget] = useState(0);
+
   // Migrasi kategori lama ke baru (Fotografi/Videografi → Dokumentasi, MUA/Make Up → Attire)
   const migrateCategory = (cat) => {
     if (!cat) return cat;
@@ -73,6 +81,9 @@ export default function WeddingPlanner() {
           if (data.guests) setGuests(data.guests);
           if (data.vendors) setVendors(data.vendors.map(v => ({ ...v, category: migrateCategory(v.category) })));
           if (data.wishlistVendors) setWishlistVendors(data.wishlistVendors.map(w => ({ ...w, category: migrateCategory(w.category) })));
+          if (data.incomeSources) setIncomeSources(data.incomeSources);
+          if (data.targetSourceChoice) setTargetSourceChoice(data.targetSourceChoice);
+          if (data.customTarget !== undefined) setCustomTarget(data.customTarget);
         }
         setSyncStatus("synced");
         setLoading(false);
@@ -109,7 +120,10 @@ export default function WeddingPlanner() {
       "transactions": "transactions",
       "guests": "guests",
       "vendors": "vendors",
-      "wishlistVendors": "wishlistVendors"
+      "wishlistVendors": "wishlistVendors",
+      "incomeSources": "incomeSources",
+      "targetSourceChoice": "targetSourceChoice",
+      "customTarget": "customTarget"
     };
     const field = fieldMap[key];
     if (field) {
@@ -316,6 +330,68 @@ export default function WeddingPlanner() {
     setWishlistVendors(updated);
     saveData("wishlistVendors", updated);
   };
+
+  // Handler untuk Income Sources
+  const saveIncomeSource = () => {
+    if (!newIncomeSource.name.trim() || !newIncomeSource.amount) return;
+    
+    if (editingIncomeId) {
+      const updated = incomeSources.map(s => 
+        s.id === editingIncomeId 
+          ? { ...newIncomeSource, id: editingIncomeId, amount: parseFloat(newIncomeSource.amount) || 0 }
+          : s
+      );
+      setIncomeSources(updated);
+      saveData("incomeSources", updated);
+    } else {
+      const updated = [...incomeSources, { 
+        ...newIncomeSource, 
+        id: Date.now(),
+        amount: parseFloat(newIncomeSource.amount) || 0
+      }];
+      setIncomeSources(updated);
+      saveData("incomeSources", updated);
+    }
+    
+    setNewIncomeSource({ name: "", amount: "", startMonth: "" });
+    setEditingIncomeId(null);
+    setShowIncomeForm(false);
+  };
+
+  const startEditIncome = (source) => {
+    setNewIncomeSource({
+      name: source.name || "",
+      amount: source.amount || "",
+      startMonth: source.startMonth || ""
+    });
+    setEditingIncomeId(source.id);
+    setShowIncomeForm(true);
+    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 100);
+  };
+
+  const cancelEditIncome = () => {
+    setNewIncomeSource({ name: "", amount: "", startMonth: "" });
+    setEditingIncomeId(null);
+    setShowIncomeForm(false);
+  };
+
+  const deleteIncomeSource = (id) => {
+    const updated = incomeSources.filter(s => s.id !== id);
+    setIncomeSources(updated);
+    saveData("incomeSources", updated);
+  };
+
+  const updateTargetSourceChoice = (choice) => {
+    setTargetSourceChoice(choice);
+    saveData("targetSourceChoice", choice);
+  };
+  
+  const updateCustomTarget = (val) => {
+    const num = parseFloat(val) || 0;
+    setCustomTarget(num);
+    saveData("customTarget", num);
+  };
+
   const moveToVendor = (wishlist) => {
     // Cek jika sudah dipilih, jangan tambah lagi
     if (wishlist.selected) return;
@@ -387,6 +463,84 @@ export default function WeddingPlanner() {
     if (v.status === "Lunas") acc[v.category].lunas += v.price || 0;
     return acc;
   }, {});
+
+  // === FINANCIAL PLANNING / FORECAST ===
+  // Target untuk perencanaan: dipilih sendiri oleh user
+  const targetForPlan = (() => {
+    if (targetSourceChoice === "custom") return customTarget;
+    if (targetSourceChoice === "budget") return weddingInfo.budget || 0;
+    if (targetSourceChoice === "vendors") return totalTargetVendor;
+    return 0;
+  })();
+  const targetSourceLabel = (() => {
+    if (targetSourceChoice === "custom") return "Target Custom";
+    if (targetSourceChoice === "budget") return "Total Anggaran (Beranda)";
+    if (targetSourceChoice === "vendors") return "Total Vendor Terpilih";
+    return "";
+  })();
+  
+  // Total pemasukan bulanan (semua sumber)
+  const totalMonthlyIncome = incomeSources.reduce((s, src) => s + (src.amount || 0), 0);
+  
+  // Hitung jumlah bulan tersisa hingga pernikahan
+  const monthsUntilWedding = (() => {
+    if (!weddingInfo.weddingDate) return 0;
+    const now = new Date();
+    const wd = new Date(weddingInfo.weddingDate);
+    const months = (wd.getFullYear() - now.getFullYear()) * 12 + (wd.getMonth() - now.getMonth());
+    return Math.max(0, months);
+  })();
+
+  // Generate proyeksi bulanan
+  const generateProjection = () => {
+    if (!weddingInfo.weddingDate || incomeSources.length === 0) return [];
+    
+    const projections = [];
+    const now = new Date();
+    const startMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const wd = new Date(weddingInfo.weddingDate);
+    const endMonth = new Date(wd.getFullYear(), wd.getMonth(), 1);
+    
+    let currentBalance = balance; // Saldo awal otomatis dari Keuangan (Pemasukan - Pengeluaran)
+    let cursor = new Date(startMonth);
+    let monthCount = 0;
+    
+    while (cursor <= endMonth && monthCount < 60) { // Max 60 bulan untuk safety
+      // Hitung pemasukan untuk bulan ini (semua sumber yang sudah aktif)
+      const monthIncome = incomeSources.reduce((sum, src) => {
+        if (!src.startMonth) return sum + src.amount;
+        const srcStart = new Date(src.startMonth + "-01");
+        if (cursor >= srcStart) return sum + src.amount;
+        return sum;
+      }, 0);
+      
+      currentBalance += monthIncome;
+      const sisaKeTarget = targetForPlan - currentBalance;
+      
+      projections.push({
+        month: new Date(cursor),
+        monthLabel: cursor.toLocaleDateString("id-ID", { month: "short", year: "numeric" }),
+        monthlyIncome: monthIncome,
+        cumulative: currentBalance,
+        sisaKeTarget: sisaKeTarget,
+        targetReached: currentBalance >= targetForPlan
+      });
+      
+      cursor.setMonth(cursor.getMonth() + 1);
+      monthCount++;
+    }
+    
+    return projections;
+  };
+
+  const projection = generateProjection();
+  const finalBalance = projection.length > 0 ? projection[projection.length - 1].cumulative : balance;
+  const targetReachedMonth = projection.find(p => p.targetReached);
+  const shortfall = targetForPlan - finalBalance; // Selisih (jika negatif berarti surplus)
+  const monthlyNeededPerMonth = monthsUntilWedding > 0 
+    ? Math.max(0, (targetForPlan - balance) / monthsUntilWedding) 
+    : 0;
+
   const completedTodos = todos.filter(t => t.completed).length;
   const todoProgress = todos.length > 0 ? (completedTodos / todos.length) * 100 : 0;
   const confirmedGuests = guests.filter(g => g.rsvp === "Hadir").length;
@@ -421,6 +575,7 @@ export default function WeddingPlanner() {
     { id: "todos", label: "Tugas", icon: CheckSquare },
     { id: "schedule", label: "Jadwal", icon: Calendar },
     { id: "finance", label: "Keuangan", icon: Wallet },
+    { id: "plan", label: "Rencana", icon: PiggyBank },
     { id: "guests", label: "Tamu", icon: Users },
     { id: "wishlist", label: "Riset Vendor", icon: Search },
     { id: "vendors", label: "Vendor Terpilih", icon: Store },
@@ -948,6 +1103,424 @@ export default function WeddingPlanner() {
                   </div>
                 ))}
               </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB RENCANA - Perencanaan Keuangan & Proyeksi */}
+        {activeTab === "plan" && (
+          <div className="fade-in">
+            <div className="text-center mb-8">
+              <p className="text-xs tracking-[0.3em] uppercase text-stone-500 mb-2">Perencanaan Keuangan</p>
+              <h2 className="serif text-3xl sm:text-4xl font-light italic">Rencana Tabungan</h2>
+              <p className="text-sm text-stone-600 mt-3 max-w-xl mx-auto">
+                Atur sumber pemasukan rutin Anda dan lihat proyeksi tabungan hingga hari pernikahan.
+              </p>
+            </div>
+
+            {/* Pilih Sumber Target */}
+            <section className="mb-8">
+              <p className="text-xs tracking-widest uppercase text-stone-500 mb-3">Sumber Target Dana</p>
+              <div className="bg-white border border-stone-200 p-5">
+                <p className="text-sm text-stone-600 mb-4">Pilih dari mana target dana pernikahan Anda dihitung:</p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 mb-4">
+                  <button
+                    onClick={() => updateTargetSourceChoice("budget")}
+                    className={`text-left p-4 border transition-colors ${
+                      targetSourceChoice === "budget" 
+                        ? "border-stone-900 bg-stone-50" 
+                        : "border-stone-200 hover:border-stone-400"
+                    }`}
+                  >
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-1">Anggaran Beranda</p>
+                    <p className="serif text-base">{formatRupiah(weddingInfo.budget || 0)}</p>
+                    {targetSourceChoice === "budget" && (
+                      <p className="text-xs text-emerald-700 mt-2">✓ Dipilih</p>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => updateTargetSourceChoice("vendors")}
+                    className={`text-left p-4 border transition-colors ${
+                      targetSourceChoice === "vendors" 
+                        ? "border-stone-900 bg-stone-50" 
+                        : "border-stone-200 hover:border-stone-400"
+                    }`}
+                  >
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-1">Vendor Terpilih</p>
+                    <p className="serif text-base">{formatRupiah(totalTargetVendor)}</p>
+                    {targetSourceChoice === "vendors" && (
+                      <p className="text-xs text-emerald-700 mt-2">✓ Dipilih</p>
+                    )}
+                  </button>
+                  <button
+                    onClick={() => updateTargetSourceChoice("custom")}
+                    className={`text-left p-4 border transition-colors ${
+                      targetSourceChoice === "custom" 
+                        ? "border-stone-900 bg-stone-50" 
+                        : "border-stone-200 hover:border-stone-400"
+                    }`}
+                  >
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-1">Target Custom</p>
+                    <p className="serif text-base">{formatRupiah(customTarget)}</p>
+                    {targetSourceChoice === "custom" && (
+                      <p className="text-xs text-emerald-700 mt-2">✓ Dipilih</p>
+                    )}
+                  </button>
+                </div>
+                
+                {targetSourceChoice === "custom" && (
+                  <div className="border-t border-stone-100 pt-4 fade-in">
+                    <label className="block text-xs tracking-wider uppercase text-stone-500 mb-2">Masukkan target custom</label>
+                    <input
+                      type="number"
+                      value={customTarget}
+                      onChange={(e) => updateCustomTarget(e.target.value)}
+                      placeholder="100000000"
+                      className="w-full px-3 py-2 border border-stone-200 bg-white text-stone-900"
+                    />
+                    <p className="text-xs text-stone-500 mt-2 italic">Gunakan ini jika ingin menentukan target sendiri (mis. termasuk dana darurat atau honeymoon)</p>
+                  </div>
+                )}
+              </div>
+            </section>
+
+            {/* Saldo Awal Otomatis dari Tab Keuangan */}
+            <section className="mb-8">
+              <p className="text-xs tracking-widest uppercase text-stone-500 mb-3">Saldo Awal (otomatis dari Keuangan)</p>
+              <div className="bg-white border border-stone-200 p-5">
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="text-center border-r border-stone-100 pr-4">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Pemasukan</p>
+                    <p className="serif text-base sm:text-lg text-stone-700">{formatRupiah(totalIncome)}</p>
+                  </div>
+                  <div className="text-center border-r border-stone-100 pr-4">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Pengeluaran</p>
+                    <p className="serif text-base sm:text-lg text-stone-700">− {formatRupiah(totalExpense)}</p>
+                  </div>
+                  <div className="text-center">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Saldo Awal</p>
+                    <p className={`serif text-base sm:text-lg ${balance < 0 ? "text-red-700" : "text-stone-900"}`}>{formatRupiah(balance)}</p>
+                  </div>
+                </div>
+                <p className="text-xs text-stone-500 mt-4 italic text-center">
+                  Saldo dihitung otomatis dari Pemasukan dikurangi Pengeluaran di tab <button onClick={() => setActiveTab("finance")} className="underline hover:text-stone-900">Keuangan</button>. 
+                  Untuk menambah saldo awal, tambahkan transaksi Pemasukan di sana.
+                </p>
+              </div>
+            </section>
+
+            {/* SUMBER PEMASUKAN BULANAN */}
+            <section className="mb-8">
+              <div className="flex items-end justify-between mb-3">
+                <p className="text-xs tracking-widest uppercase text-stone-500">Sumber Pemasukan Bulanan</p>
+                <button
+                  onClick={() => {
+                    if (showIncomeForm) {
+                      cancelEditIncome();
+                    } else {
+                      setEditingIncomeId(null);
+                      setNewIncomeSource({ name: "", amount: "", startMonth: "" });
+                      setShowIncomeForm(true);
+                    }
+                  }}
+                  className="flex items-center gap-2 px-3 py-1.5 border border-stone-900 text-stone-900 hover:bg-stone-900 hover:text-stone-50 transition-colors text-xs tracking-wider uppercase"
+                >
+                  <Plus className="w-3 h-3" /> Tambah
+                </button>
+              </div>
+
+              {showIncomeForm && (
+                <div className="bg-white border border-stone-300 p-6 mb-4 fade-in">
+                  <p className="text-xs tracking-widest uppercase text-stone-500 mb-4">{editingIncomeId ? "Edit Sumber Pemasukan" : "Sumber Pemasukan Baru"}</p>
+                  <div className="space-y-3">
+                    <input
+                      type="text"
+                      placeholder="Nama sumber (mis. Gaji Rinaldi, Gaji Naura, Freelance)"
+                      value={newIncomeSource.name}
+                      onChange={(e) => setNewIncomeSource({ ...newIncomeSource, name: e.target.value })}
+                      className="w-full px-3 py-2 border border-stone-200 bg-white"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Jumlah per bulan (Rp)"
+                      value={newIncomeSource.amount}
+                      onChange={(e) => setNewIncomeSource({ ...newIncomeSource, amount: e.target.value })}
+                      className="w-full px-3 py-2 border border-stone-200 bg-white"
+                    />
+                    <div>
+                      <label className="block text-xs tracking-wider uppercase text-stone-500 mb-2">Mulai dari bulan (opsional)</label>
+                      <input
+                        type="month"
+                        value={newIncomeSource.startMonth}
+                        onChange={(e) => setNewIncomeSource({ ...newIncomeSource, startMonth: e.target.value })}
+                        className="w-full px-3 py-2 border border-stone-200 bg-white"
+                      />
+                      <p className="text-xs text-stone-500 mt-1 italic">Kosongkan jika sudah aktif sekarang</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={saveIncomeSource} className="px-5 py-2 bg-stone-900 text-stone-50 text-xs tracking-wider uppercase hover:bg-stone-800">{editingIncomeId ? "Update" : "Simpan"}</button>
+                    <button onClick={cancelEditIncome} className="px-5 py-2 border border-stone-300 text-stone-700 text-xs tracking-wider uppercase hover:bg-stone-100">Batal</button>
+                  </div>
+                </div>
+              )}
+
+              {incomeSources.length === 0 ? (
+                <div className="text-center py-12 border border-dashed border-stone-300">
+                  <PiggyBank className="w-8 h-8 text-stone-300 mx-auto mb-3" />
+                  <p className="text-sm text-stone-500">Belum ada sumber pemasukan</p>
+                  <p className="text-xs text-stone-400 mt-1">Tambahkan gaji atau pemasukan rutin Anda</p>
+                </div>
+              ) : (
+                <div className="bg-white border border-stone-200">
+                  {incomeSources.map((src, i) => (
+                    <div key={src.id} className={`flex items-center gap-3 p-4 ${i !== 0 ? "border-t border-stone-100" : ""}`}>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm">{src.name}</p>
+                        <p className="text-xs text-stone-500 mt-0.5">
+                          {src.startMonth && `Mulai ${new Date(src.startMonth + "-01").toLocaleDateString("id-ID", { month: "long", year: "numeric" })}`}
+                        </p>
+                      </div>
+                      <p className="serif text-base flex-shrink-0">{formatRupiah(src.amount)}<span className="text-xs text-stone-500">/bln</span></p>
+                      <button onClick={() => startEditIncome(src)} className="text-stone-500 hover:text-stone-900 p-1">
+                        <Edit2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button onClick={() => deleteIncomeSource(src.id)} className="text-stone-400 hover:text-stone-700 p-1">
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  {/* Total */}
+                  <div className="flex items-center gap-3 p-4 border-t-2 border-stone-300 bg-stone-50">
+                    <p className="flex-1 text-xs tracking-wider uppercase text-stone-700">Total per bulan</p>
+                    <p className="serif text-lg">{formatRupiah(totalMonthlyIncome)}</p>
+                  </div>
+                </div>
+              )}
+            </section>
+
+            {/* RINGKASAN PROYEKSI */}
+            {weddingInfo.weddingDate && incomeSources.length > 0 && targetForPlan > 0 && (
+              <section className="mb-8">
+                <div className="flex items-center justify-between mb-3">
+                  <p className="text-xs tracking-widest uppercase text-stone-500">Ringkasan Proyeksi</p>
+                  <p className="text-xs text-stone-400 italic">Target dari: {targetSourceLabel}</p>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-px bg-stone-200 border border-stone-200">
+                  <div className="bg-white p-5">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Target Dana</p>
+                    <p className="serif text-xl font-light">{formatRupiah(targetForPlan)}</p>
+                  </div>
+                  <div className="bg-white p-5">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Sisa Bulan</p>
+                    <p className="serif text-xl font-light">{monthsUntilWedding} <span className="text-sm text-stone-500">bulan</span></p>
+                  </div>
+                  <div className="bg-white p-5">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Saldo Akhir</p>
+                    <p className={`serif text-xl font-light ${finalBalance >= targetForPlan ? "text-emerald-700" : "text-amber-700"}`}>
+                      {formatRupiah(finalBalance)}
+                    </p>
+                  </div>
+                  <div className="bg-white p-5">
+                    <p className="text-xs tracking-wider uppercase text-stone-500 mb-2">Status</p>
+                    {finalBalance >= targetForPlan ? (
+                      <p className="serif text-xl font-light text-emerald-700">Tercapai ✓</p>
+                    ) : (
+                      <p className="serif text-xl font-light text-amber-700">Kurang {formatRupiah(Math.abs(shortfall))}</p>
+                    )}
+                  </div>
+                </div>
+
+                {/* Insight Box */}
+                <div className={`mt-4 p-5 ${finalBalance >= targetForPlan ? "bg-emerald-50 border border-emerald-200" : "bg-amber-50 border border-amber-200"}`}>
+                  {finalBalance >= targetForPlan && targetReachedMonth ? (
+                    <div className="flex items-start gap-3">
+                      <Check className="w-5 h-5 text-emerald-700 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-xs tracking-wider uppercase text-emerald-800 mb-1">Selamat!</p>
+                        <p className="text-sm text-emerald-900 leading-relaxed">
+                          Target dana akan <strong>tercapai pada {targetReachedMonth.monthLabel}</strong>
+                          {(() => {
+                            const targetIdx = projection.findIndex(p => p.targetReached);
+                            const remainingMonths = projection.length - 1 - targetIdx;
+                            return remainingMonths > 0 ? `, ${remainingMonths} bulan sebelum hari pernikahan` : "";
+                          })()}.
+                          Saldo akhir di hari pernikahan: <strong>{formatRupiah(finalBalance)}</strong>
+                          {finalBalance > targetForPlan && ` (surplus ${formatRupiah(finalBalance - targetForPlan)})`}.
+                        </p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-3">
+                      <AlertCircle className="w-5 h-5 text-amber-700 flex-shrink-0 mt-0.5" />
+                      <div className="flex-1">
+                        <p className="text-xs tracking-wider uppercase text-amber-800 mb-1">Perlu Perhatian</p>
+                        <p className="text-sm text-amber-900 leading-relaxed">
+                          Dengan rencana saat ini, dana Anda akan <strong>kurang {formatRupiah(Math.abs(shortfall))}</strong> dari target.
+                          {monthsUntilWedding > 0 && (
+                            <> Anda perlu menabung minimal <strong>{formatRupiah(monthlyNeededPerMonth)}/bulan</strong> untuk mencapai target tepat waktu.</>
+                          )}
+                        </p>
+                        <p className="text-xs text-amber-700 mt-2 italic">
+                          💡 Pertimbangkan: tambah pemasukan, kurangi vendor opsional, atau geser tanggal pernikahan
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+            )}
+
+            {/* GRAFIK PROYEKSI */}
+            {projection.length > 1 && (
+              <section className="mb-8">
+                <p className="text-xs tracking-widest uppercase text-stone-500 mb-3">Grafik Perkembangan Tabungan</p>
+                <div className="bg-white border border-stone-200 p-5">
+                  {(() => {
+                    const maxVal = Math.max(...projection.map(p => p.cumulative), targetForPlan);
+                    const minVal = 0;
+                    const range = maxVal - minVal || 1;
+                    const chartHeight = 200;
+                    const chartWidth = 100;
+                    const points = projection.map((p, i) => {
+                      const x = (i / (projection.length - 1)) * chartWidth;
+                      const y = chartHeight - ((p.cumulative - minVal) / range) * chartHeight;
+                      return `${x},${y}`;
+                    });
+                    const targetY = chartHeight - ((targetForPlan - minVal) / range) * chartHeight;
+                    const areaPath = `M0,${chartHeight} L${points.join(" L")} L${chartWidth},${chartHeight} Z`;
+                    const linePath = `M${points.join(" L")}`;
+
+                    return (
+                      <>
+                        <div className="relative" style={{ paddingBottom: "50%" }}>
+                          <svg viewBox={`-5 -10 ${chartWidth + 10} ${chartHeight + 30}`} preserveAspectRatio="none" className="absolute inset-0 w-full h-full">
+                            {/* Grid lines */}
+                            {[0, 0.25, 0.5, 0.75, 1].map(p => (
+                              <line key={p} x1="0" x2={chartWidth} y1={chartHeight * (1 - p)} y2={chartHeight * (1 - p)} stroke="#e7e5e4" strokeWidth="0.2" />
+                            ))}
+                            {/* Target line (dashed) */}
+                            <line x1="0" x2={chartWidth} y1={targetY} y2={targetY} stroke="#dc2626" strokeWidth="0.4" strokeDasharray="1,1" />
+                            <text x={chartWidth} y={targetY - 2} textAnchor="end" fontSize="3" fill="#dc2626" fontFamily="Inter, sans-serif">Target {formatRupiah(targetForPlan)}</text>
+                            {/* Area under line */}
+                            <path d={areaPath} fill="#1c1917" fillOpacity="0.05" />
+                            {/* Line */}
+                            <path d={linePath} fill="none" stroke="#1c1917" strokeWidth="0.6" />
+                            {/* Points */}
+                            {projection.map((p, i) => {
+                              const x = (i / (projection.length - 1)) * chartWidth;
+                              const y = chartHeight - ((p.cumulative - minVal) / range) * chartHeight;
+                              return (
+                                <circle 
+                                  key={i} 
+                                  cx={x} 
+                                  cy={y} 
+                                  r={p.targetReached && i === projection.findIndex(pp => pp.targetReached) ? "1.2" : "0.6"} 
+                                  fill={p.targetReached ? "#059669" : "#1c1917"}
+                                />
+                              );
+                            })}
+                          </svg>
+                        </div>
+                        <div className="flex justify-between text-xs text-stone-500 mt-2 px-1">
+                          <span>{projection[0]?.monthLabel}</span>
+                          <span>{projection[projection.length - 1]?.monthLabel}</span>
+                        </div>
+                        <div className="flex items-center gap-4 mt-3 text-xs">
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-3 h-0.5 bg-stone-900"></div>
+                            <span className="text-stone-600">Saldo tabungan</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-3 h-0.5 border-t border-dashed border-red-600" style={{ borderTopWidth: "1px" }}></div>
+                            <span className="text-stone-600">Target dana</span>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <div className="w-2 h-2 rounded-full bg-emerald-600"></div>
+                            <span className="text-stone-600">Target tercapai</span>
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
+                </div>
+              </section>
+            )}
+
+            {/* TABEL PROYEKSI BULANAN */}
+            {projection.length > 0 && (
+              <section className="mb-8">
+                <p className="text-xs tracking-widest uppercase text-stone-500 mb-3">Proyeksi Bulanan</p>
+                <div className="bg-white border border-stone-200 overflow-x-auto">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="border-b border-stone-200 bg-stone-50">
+                        <th className="text-left py-3 px-3 text-xs tracking-wider uppercase text-stone-500 font-normal">Bulan</th>
+                        <th className="text-right py-3 px-3 text-xs tracking-wider uppercase text-stone-500 font-normal">Pemasukan</th>
+                        <th className="text-right py-3 px-3 text-xs tracking-wider uppercase text-stone-500 font-normal">Saldo Tabungan</th>
+                        <th className="text-right py-3 px-3 text-xs tracking-wider uppercase text-stone-500 font-normal">Sisa ke Target</th>
+                        <th className="text-center py-3 px-3 text-xs tracking-wider uppercase text-stone-500 font-normal">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {projection.map((p, i) => {
+                        const isFirstReached = p.targetReached && i === projection.findIndex(pp => pp.targetReached);
+                        return (
+                          <tr key={i} className={`border-b border-stone-100 last:border-0 ${isFirstReached ? "bg-emerald-50" : ""}`}>
+                            <td className="py-2 px-3 serif">{p.monthLabel}</td>
+                            <td className="py-2 px-3 text-right text-stone-700">+ {formatRupiah(p.monthlyIncome)}</td>
+                            <td className="py-2 px-3 text-right serif">{formatRupiah(p.cumulative)}</td>
+                            <td className="py-2 px-3 text-right text-xs">
+                              {p.sisaKeTarget > 0 
+                                ? <span className="text-amber-700">{formatRupiah(p.sisaKeTarget)}</span>
+                                : <span className="text-emerald-700">+ {formatRupiah(Math.abs(p.sisaKeTarget))}</span>
+                              }
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              {isFirstReached ? (
+                                <span className="text-xs px-2 py-0.5 bg-emerald-600 text-white">Tercapai 🎉</span>
+                              ) : p.targetReached ? (
+                                <span className="text-xs text-emerald-700">✓ Surplus</span>
+                              ) : (
+                                <span className="text-xs text-stone-400">Menabung</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </section>
+            )}
+
+            {/* Empty state guidance */}
+            {(!weddingInfo.weddingDate || incomeSources.length === 0 || targetForPlan === 0) && (
+              <section className="mb-8">
+                <div className="bg-stone-100 border border-stone-200 p-5">
+                  <p className="text-xs tracking-widest uppercase text-stone-700 mb-3">Untuk Melihat Proyeksi, Lengkapi:</p>
+                  <ul className="space-y-2 text-sm">
+                    {!weddingInfo.weddingDate && (
+                      <li className="flex items-center gap-2 text-stone-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-stone-400"></span>
+                        Tanggal pernikahan di <button onClick={() => setActiveTab("dashboard")} className="underline hover:text-stone-900">Beranda</button>
+                      </li>
+                    )}
+                    {incomeSources.length === 0 && (
+                      <li className="flex items-center gap-2 text-stone-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-stone-400"></span>
+                        Tambahkan minimal 1 sumber pemasukan di atas
+                      </li>
+                    )}
+                    {targetForPlan === 0 && (
+                      <li className="flex items-center gap-2 text-stone-700">
+                        <span className="w-1.5 h-1.5 rounded-full bg-stone-400"></span>
+                        Isi <button onClick={() => setActiveTab("dashboard")} className="underline hover:text-stone-900">Total Anggaran di Beranda</button> atau pilih vendor di <button onClick={() => setActiveTab("vendors")} className="underline hover:text-stone-900">Vendor Terpilih</button>
+                      </li>
+                    )}
+                  </ul>
+                </div>
+              </section>
             )}
           </div>
         )}
