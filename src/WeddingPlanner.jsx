@@ -1,19 +1,14 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { 
   Calendar, CheckSquare, Wallet, Users, Store, 
   Plus, Trash2, Check, Clock, MapPin, Phone,
   TrendingUp, TrendingDown, Home, Search,
-  AlertCircle, Star, ChevronDown, ChevronUp, Target,
-  Cloud, CloudOff, Loader2
+  AlertCircle, Star, ChevronDown, ChevronUp, Target, Edit2
 } from "lucide-react";
-import { db } from "./firebase";
-import { doc, onSnapshot, setDoc } from "firebase/firestore";
 
 export default function WeddingPlanner() {
   const [activeTab, setActiveTab] = useState("dashboard");
   const [loading, setLoading] = useState(true);
-  const [syncStatus, setSyncStatus] = useState("connecting"); // connecting | synced | saving | error
-  const isInitialLoad = useRef(true);
   
   const [weddingInfo, setWeddingInfo] = useState({
     weddingDate: "",
@@ -47,67 +42,53 @@ export default function WeddingPlanner() {
     contact: "", location: "", rating: 0, pros: "", cons: "", notes: "", link: ""
   });
   const [showWishlistForm, setShowWishlistForm] = useState(false);
+  const [editingWishlistId, setEditingWishlistId] = useState(null);
   const [wishlistFilter, setWishlistFilter] = useState("Semua");
   const [expandedWishlist, setExpandedWishlist] = useState(null);
 
-  // Real-time sync dengan Firestore
-  useEffect(() => {
-    const docRef = doc(db, "wedding", "main");
-    
-    const unsubscribe = onSnapshot(docRef, 
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data();
-          if (data.weddingInfo) setWeddingInfo(data.weddingInfo);
-          if (data.todos) setTodos(data.todos);
-          if (data.events) setEvents(data.events);
-          if (data.transactions) setTransactions(data.transactions);
-          if (data.guests) setGuests(data.guests);
-          if (data.vendors) setVendors(data.vendors);
-          if (data.wishlistVendors) setWishlistVendors(data.wishlistVendors);
-        }
-        setSyncStatus("synced");
-        setLoading(false);
-        isInitialLoad.current = false;
-      },
-      (error) => {
-        console.error("Firestore error:", error);
-        setSyncStatus("error");
-        setLoading(false);
-      }
-    );
-    
-    return () => unsubscribe();
-  }, []);
-
-  // Helper untuk simpan data ke Firestore
-  const saveToFirestore = async (updates) => {
-    if (isInitialLoad.current) return;
-    setSyncStatus("saving");
-    try {
-      const docRef = doc(db, "wedding", "main");
-      await setDoc(docRef, updates, { merge: true });
-      setSyncStatus("synced");
-    } catch (e) {
-      console.error("Save error:", e);
-      setSyncStatus("error");
-    }
+  // Migrasi kategori lama ke baru (Fotografi/Videografi → Dokumentasi, MUA/Make Up → Attire)
+  const migrateCategory = (cat) => {
+    if (!cat) return cat;
+    if (cat === "Fotografi" || cat === "Videografi") return "Dokumentasi";
+    if (cat === "MUA / Make Up" || cat === "Make Up") return "Attire";
+    return cat;
   };
 
-  // Helper backward-compatible untuk semua handler yang sudah ada
-  const saveData = (key, data) => {
-    const fieldMap = {
-      "weddingInfoV2": "weddingInfo",
-      "todos": "todos",
-      "events": "events",
-      "transactions": "transactions",
-      "guests": "guests",
-      "vendors": "vendors",
-      "wishlistVendors": "wishlistVendors"
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const keys = ["weddingInfoV2", "todos", "events", "transactions", "guests", "vendors", "wishlistVendors"];
+        const results = await Promise.all(
+          keys.map(async (key) => {
+            try {
+              const r = await window.storage.get(key);
+              return r ? JSON.parse(r.value) : null;
+            } catch {
+              return null;
+            }
+          })
+        );
+        if (results[0]) setWeddingInfo(results[0]);
+        if (results[1]) setTodos(results[1]);
+        if (results[2]) setEvents(results[2]);
+        if (results[3]) setTransactions(results[3].map(t => ({ ...t, category: migrateCategory(t.category) })));
+        if (results[4]) setGuests(results[4]);
+        if (results[5]) setVendors(results[5].map(v => ({ ...v, category: migrateCategory(v.category) })));
+        if (results[6]) setWishlistVendors(results[6].map(w => ({ ...w, category: migrateCategory(w.category) })));
+      } catch (e) {
+        console.error("Load error:", e);
+      } finally {
+        setLoading(false);
+      }
     };
-    const field = fieldMap[key];
-    if (field) {
-      saveToFirestore({ [field]: data });
+    loadData();
+  }, []);
+
+  const saveData = async (key, data) => {
+    try {
+      await window.storage.set(key, JSON.stringify(data));
+    } catch (e) {
+      console.error("Save error:", e);
     }
   };
 
@@ -213,21 +194,98 @@ export default function WeddingPlanner() {
     }
   };
 
-  const addWishlist = () => {
+  const saveWishlist = () => {
     if (!newWishlist.name.trim()) return;
-    const updated = [...wishlistVendors, { 
-      ...newWishlist, id: Date.now(), 
-      price: parseFloat(newWishlist.price) || 0,
-      rating: parseInt(newWishlist.rating) || 0
-    }];
-    setWishlistVendors(updated);
-    saveData("wishlistVendors", updated);
+    
+    if (editingWishlistId) {
+      // Mode edit: update vendor yang sudah ada
+      const updated = wishlistVendors.map(w => 
+        w.id === editingWishlistId 
+          ? { 
+              ...w, 
+              ...newWishlist, 
+              id: editingWishlistId, // pertahankan id asli
+              price: parseFloat(newWishlist.price) || 0,
+              rating: parseInt(newWishlist.rating) || 0,
+              // pertahankan status selected
+              selected: w.selected,
+              selectedVendorId: w.selectedVendorId
+            } 
+          : w
+      );
+      setWishlistVendors(updated);
+      saveData("wishlistVendors", updated);
+      
+      // Jika vendor ini sudah dipilih, update juga data di vendors
+      const editedW = wishlistVendors.find(w => w.id === editingWishlistId);
+      if (editedW && editedW.selected) {
+        const updatedV = vendors.map(v => 
+          v.wishlistId === editingWishlistId
+            ? { 
+                ...v, 
+                name: newWishlist.name,
+                category: newWishlist.category,
+                contact: newWishlist.contact,
+                price: parseFloat(newWishlist.price) || 0,
+                notes: `${newWishlist.type === "Eceran" ? "[Eceran] " : ""}${newWishlist.notes || ""}`
+              }
+            : v
+        );
+        setVendors(updatedV);
+        saveData("vendors", updatedV);
+      }
+    } else {
+      // Mode tambah baru
+      const updated = [...wishlistVendors, { 
+        ...newWishlist, id: Date.now(), 
+        price: parseFloat(newWishlist.price) || 0,
+        rating: parseInt(newWishlist.rating) || 0
+      }];
+      setWishlistVendors(updated);
+      saveData("wishlistVendors", updated);
+    }
+    
+    // Reset form
     setNewWishlist({ 
       name: "", category: "Catering", type: "Paket", price: "", 
       contact: "", location: "", rating: 0, pros: "", cons: "", notes: "", link: ""
     });
+    setEditingWishlistId(null);
     setShowWishlistForm(false);
   };
+  
+  // Untuk backward compatibility
+  const addWishlist = saveWishlist;
+  
+  const startEditWishlist = (w) => {
+    setNewWishlist({
+      name: w.name || "",
+      category: w.category || "Catering",
+      type: w.type || "Paket",
+      price: w.price || "",
+      contact: w.contact || "",
+      location: w.location || "",
+      rating: w.rating || 0,
+      pros: w.pros || "",
+      cons: w.cons || "",
+      notes: w.notes || "",
+      link: w.link || ""
+    });
+    setEditingWishlistId(w.id);
+    setShowWishlistForm(true);
+    // Scroll ke atas form (kalau dalam list panjang)
+    setTimeout(() => window.scrollTo({ top: 0, behavior: "smooth" }), 100);
+  };
+  
+  const cancelEditWishlist = () => {
+    setNewWishlist({ 
+      name: "", category: "Catering", type: "Paket", price: "", 
+      contact: "", location: "", rating: 0, pros: "", cons: "", notes: "", link: ""
+    });
+    setEditingWishlistId(null);
+    setShowWishlistForm(false);
+  };
+  
   const deleteWishlist = (id) => {
     const updated = wishlistVendors.filter(w => w.id !== id);
     setWishlistVendors(updated);
@@ -325,10 +383,7 @@ export default function WeddingPlanner() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-stone-50">
-        <div className="text-center">
-          <Loader2 className="w-6 h-6 text-stone-400 animate-spin mx-auto mb-4" />
-          <p className="text-stone-400 text-sm tracking-widest uppercase">Menghubungkan...</p>
-        </div>
+        <p className="text-stone-400 text-sm tracking-widest uppercase">Memuat...</p>
       </div>
     );
   }
@@ -379,22 +434,7 @@ export default function WeddingPlanner() {
         }
       `}</style>
 
-      <header className="border-b border-stone-200 bg-stone-50 relative">
-        {/* Indikator Sync */}
-        <div className="absolute top-3 right-4 flex items-center gap-1.5 text-xs">
-          {syncStatus === "synced" && (
-            <><Cloud className="w-3 h-3 text-emerald-600" /><span className="text-stone-500 hidden sm:inline">Tersinkron</span></>
-          )}
-          {syncStatus === "saving" && (
-            <><Loader2 className="w-3 h-3 text-stone-500 animate-spin" /><span className="text-stone-500 hidden sm:inline">Menyimpan...</span></>
-          )}
-          {syncStatus === "connecting" && (
-            <><Loader2 className="w-3 h-3 text-stone-500 animate-spin" /><span className="text-stone-500 hidden sm:inline">Menghubungkan...</span></>
-          )}
-          {syncStatus === "error" && (
-            <><CloudOff className="w-3 h-3 text-red-600" /><span className="text-red-600 hidden sm:inline">Gagal sync</span></>
-          )}
-        </div>
+      <header className="border-b border-stone-200 bg-stone-50">
         <div className="max-w-5xl mx-auto px-6 py-10 sm:py-14 text-center">
           <p className="text-xs tracking-[0.3em] uppercase text-stone-500 mb-4">Wedding Planner</p>
           <h1 className="serif text-3xl sm:text-5xl font-light text-stone-900 italic">
@@ -636,7 +676,7 @@ export default function WeddingPlanner() {
                     <input type="time" value={newEvent.time} onChange={(e) => setNewEvent({ ...newEvent, time: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white" />
                   </div>
                   <input type="text" placeholder="Lokasi" value={newEvent.location} onChange={(e) => setNewEvent({ ...newEvent, location: e.target.value })} className="w-full px-3 py-2 border border-stone-200 bg-white" />
-                  <textarea placeholder="Catatan" value={newEvent.notes} onChange={(e) => setNewEvent({ ...newEvent, notes: e.target.value })} rows="2" className="w-full px-3 py-2 border border-stone-200 bg-white resize-none" />
+                  <textarea placeholder="Catatan&#10;(Enter untuk baris baru)" value={newEvent.notes} onChange={(e) => setNewEvent({ ...newEvent, notes: e.target.value })} rows="3" className="w-full px-3 py-2 border border-stone-200 bg-white resize-y" />
                 </div>
                 <div className="flex gap-2 mt-4">
                   <button onClick={addEvent} className="px-5 py-2 bg-stone-900 text-stone-50 text-xs tracking-wider uppercase hover:bg-stone-800">Simpan</button>
@@ -662,7 +702,7 @@ export default function WeddingPlanner() {
                       <p className="serif text-xl">{event.title}</p>
                       {event.time && <p className="text-xs text-stone-500 mt-1"><Clock className="w-3 h-3 inline mr-1" />{event.time}</p>}
                       {event.location && <p className="text-xs text-stone-500 mt-1"><MapPin className="w-3 h-3 inline mr-1" />{event.location}</p>}
-                      {event.notes && <p className="text-sm text-stone-600 mt-2 italic">{event.notes}</p>}
+                      {event.notes && <p className="text-sm text-stone-600 mt-2 italic whitespace-pre-line">{event.notes}</p>}
                     </div>
                     <button onClick={() => deleteEvent(event.id)} className="text-stone-400 hover:text-stone-700 flex-shrink-0">
                       <Trash2 className="w-3.5 h-3.5" />
@@ -834,7 +874,7 @@ export default function WeddingPlanner() {
                     </select>
                   </div>
                   <select value={newTransaction.category} onChange={(e) => setNewTransaction({ ...newTransaction, category: e.target.value })} className="w-full px-3 py-2 border border-stone-200 bg-white">
-                    <option>Venue</option><option>Catering</option><option>Dekorasi</option><option>Fotografi</option><option>Busana</option><option>Make Up</option><option>Undangan</option><option>Souvenir</option><option>MC & Hiburan</option><option>Mahar & Seserahan</option><option>Lainnya</option>
+                    <option>Venue</option><option>Catering</option><option>Dekorasi</option><option>Dokumentasi</option><option>Busana</option><option>Attire</option><option>Undangan</option><option>Souvenir</option><option>MC & Hiburan</option><option>Mahar & Seserahan</option><option>Lainnya</option>
                   </select>
                 </div>
                 <div className="flex gap-2 mt-4">
@@ -968,7 +1008,18 @@ export default function WeddingPlanner() {
                 <h2 className="serif text-3xl font-light italic">Riset Vendor</h2>
                 <p className="text-xs tracking-widest uppercase text-stone-500 mt-1">Daftar idaman & perbandingan</p>
               </div>
-              <button onClick={() => setShowWishlistForm(!showWishlistForm)} className="flex items-center gap-2 px-4 py-2 border border-stone-900 text-stone-900 hover:bg-stone-900 hover:text-stone-50 transition-colors text-xs tracking-wider uppercase">
+              <button onClick={() => { 
+                if (showWishlistForm) {
+                  cancelEditWishlist();
+                } else {
+                  setEditingWishlistId(null);
+                  setNewWishlist({ 
+                    name: "", category: "Catering", type: "Paket", price: "", 
+                    contact: "", location: "", rating: 0, pros: "", cons: "", notes: "", link: ""
+                  });
+                  setShowWishlistForm(true);
+                }
+              }} className="flex items-center gap-2 px-4 py-2 border border-stone-900 text-stone-900 hover:bg-stone-900 hover:text-stone-50 transition-colors text-xs tracking-wider uppercase">
                 <Plus className="w-3 h-3" /> Tambah
               </button>
             </div>
@@ -978,12 +1029,12 @@ export default function WeddingPlanner() {
 
             {showWishlistForm && (
               <div className="bg-white border border-stone-300 p-6 mb-6 fade-in">
-                <p className="text-xs tracking-widest uppercase text-stone-500 mb-4">Vendor Idaman Baru</p>
+                <p className="text-xs tracking-widest uppercase text-stone-500 mb-4">{editingWishlistId ? "Edit Vendor" : "Vendor Idaman Baru"}</p>
                 <div className="space-y-3">
                   <input type="text" placeholder="Nama vendor" value={newWishlist.name} onChange={(e) => setNewWishlist({ ...newWishlist, name: e.target.value })} className="w-full px-3 py-2 border border-stone-200 bg-white" />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <select value={newWishlist.category} onChange={(e) => setNewWishlist({ ...newWishlist, category: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white">
-                      <option>Catering</option><option>Dekorasi</option><option>Fotografi</option><option>Videografi</option><option>MUA / Make Up</option><option>Wedding Organizer</option><option>Venue</option><option>Hiburan / Band</option><option>MC</option><option>Souvenir</option><option>Undangan</option><option>Busana</option><option>Mahar & Seserahan</option><option>Bunga</option><option>Lainnya</option>
+                      <option>Catering</option><option>Dekorasi</option><option>Dokumentasi</option><option>Attire</option><option>Wedding Organizer</option><option>Venue</option><option>Hiburan / Band</option><option>MC</option><option>Souvenir</option><option>Undangan</option><option>Busana</option><option>Mahar & Seserahan</option><option>Bunga</option><option>Lainnya</option>
                     </select>
                     <select value={newWishlist.type} onChange={(e) => setNewWishlist({ ...newWishlist, type: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white">
                       <option value="Paket">Paket Lengkap</option>
@@ -1003,14 +1054,14 @@ export default function WeddingPlanner() {
                   </div>
                   
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                    <textarea placeholder="Kelebihan" value={newWishlist.pros} onChange={(e) => setNewWishlist({ ...newWishlist, pros: e.target.value })} rows="3" className="px-3 py-2 border border-stone-200 bg-white resize-none" />
-                    <textarea placeholder="Kekurangan" value={newWishlist.cons} onChange={(e) => setNewWishlist({ ...newWishlist, cons: e.target.value })} rows="3" className="px-3 py-2 border border-stone-200 bg-white resize-none" />
+                    <textarea placeholder="Kelebihan&#10;(Enter untuk baris baru)" value={newWishlist.pros} onChange={(e) => setNewWishlist({ ...newWishlist, pros: e.target.value })} rows="4" className="px-3 py-2 border border-stone-200 bg-white resize-y" />
+                    <textarea placeholder="Kekurangan&#10;(Enter untuk baris baru)" value={newWishlist.cons} onChange={(e) => setNewWishlist({ ...newWishlist, cons: e.target.value })} rows="4" className="px-3 py-2 border border-stone-200 bg-white resize-y" />
                   </div>
-                  <textarea placeholder="Catatan tambahan (paket apa saja, fasilitas, dll)" value={newWishlist.notes} onChange={(e) => setNewWishlist({ ...newWishlist, notes: e.target.value })} rows="2" className="w-full px-3 py-2 border border-stone-200 bg-white resize-none" />
+                  <textarea placeholder="Catatan tambahan&#10;(tekan Enter untuk baris baru, contoh:&#10;- Termasuk dekorasi pelaminan&#10;- Free rias 2 orang&#10;- Diskon 10% jika DP minggu ini)" value={newWishlist.notes} onChange={(e) => setNewWishlist({ ...newWishlist, notes: e.target.value })} rows="5" className="w-full px-3 py-2 border border-stone-200 bg-white resize-y" />
                 </div>
                 <div className="flex gap-2 mt-4">
-                  <button onClick={addWishlist} className="px-5 py-2 bg-stone-900 text-stone-50 text-xs tracking-wider uppercase hover:bg-stone-800">Simpan</button>
-                  <button onClick={() => setShowWishlistForm(false)} className="px-5 py-2 border border-stone-300 text-stone-700 text-xs tracking-wider uppercase hover:bg-stone-100">Batal</button>
+                  <button onClick={saveWishlist} className="px-5 py-2 bg-stone-900 text-stone-50 text-xs tracking-wider uppercase hover:bg-stone-800">{editingWishlistId ? "Update" : "Simpan"}</button>
+                  <button onClick={cancelEditWishlist} className="px-5 py-2 border border-stone-300 text-stone-700 text-xs tracking-wider uppercase hover:bg-stone-100">Batal</button>
                 </div>
               </div>
             )}
@@ -1103,13 +1154,13 @@ export default function WeddingPlanner() {
                               {w.pros && (
                                 <div className="border-l-2 border-stone-700 pl-3">
                                   <p className="text-xs tracking-wider uppercase text-stone-500 mb-1">Kelebihan</p>
-                                  <p className="text-sm text-stone-700">{w.pros}</p>
+                                  <p className="text-sm text-stone-700 whitespace-pre-line">{w.pros}</p>
                                 </div>
                               )}
                               {w.cons && (
                                 <div className="border-l-2 border-stone-300 pl-3">
                                   <p className="text-xs tracking-wider uppercase text-stone-500 mb-1">Kekurangan</p>
-                                  <p className="text-sm text-stone-600">{w.cons}</p>
+                                  <p className="text-sm text-stone-600 whitespace-pre-line">{w.cons}</p>
                                 </div>
                               )}
                             </div>
@@ -1119,7 +1170,7 @@ export default function WeddingPlanner() {
                             <div className="space-y-2 pt-3 border-t border-stone-100 fade-in">
                               {w.contact && <p className="text-xs text-stone-600"><Phone className="w-3 h-3 inline mr-1" />{w.contact}</p>}
                               {w.link && <p className="text-xs text-stone-600 break-all">🔗 {w.link}</p>}
-                              {w.notes && <p className="text-sm text-stone-600 italic">{w.notes}</p>}
+                              {w.notes && <p className="text-sm text-stone-600 italic whitespace-pre-line">{w.notes}</p>}
                             </div>
                           )}
 
@@ -1145,6 +1196,13 @@ export default function WeddingPlanner() {
                                 Pilih Ini
                               </button>
                             )}
+                            <button 
+                              onClick={() => startEditWishlist(w)} 
+                              className="text-stone-500 hover:text-stone-900 p-1.5"
+                              title="Edit vendor"
+                            >
+                              <Edit2 className="w-3.5 h-3.5" />
+                            </button>
                             <button 
                               onClick={() => deleteWishlist(w.id)} 
                               className="text-stone-400 hover:text-stone-700 p-1.5"
@@ -1185,7 +1243,7 @@ export default function WeddingPlanner() {
                   <input type="text" placeholder="Nama vendor" value={newVendor.name} onChange={(e) => setNewVendor({ ...newVendor, name: e.target.value })} className="w-full px-3 py-2 border border-stone-200 bg-white" />
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <select value={newVendor.category} onChange={(e) => setNewVendor({ ...newVendor, category: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white">
-                      <option>Catering</option><option>Dekorasi</option><option>Fotografi</option><option>Videografi</option><option>MUA / Make Up</option><option>Wedding Organizer</option><option>Venue</option><option>Hiburan / Band</option><option>MC</option><option>Souvenir</option><option>Undangan</option><option>Busana</option><option>Lainnya</option>
+                      <option>Catering</option><option>Dekorasi</option><option>Dokumentasi</option><option>Attire</option><option>Wedding Organizer</option><option>Venue</option><option>Hiburan / Band</option><option>MC</option><option>Souvenir</option><option>Undangan</option><option>Busana</option><option>Lainnya</option>
                     </select>
                     <select value={newVendor.status} onChange={(e) => setNewVendor({ ...newVendor, status: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white">
                       <option>Negosiasi</option><option>Booked</option><option>Lunas</option><option>Dibatalkan</option>
@@ -1195,7 +1253,7 @@ export default function WeddingPlanner() {
                     <input type="text" placeholder="Kontak" value={newVendor.contact} onChange={(e) => setNewVendor({ ...newVendor, contact: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white" />
                     <input type="number" placeholder="Harga (Rp)" value={newVendor.price} onChange={(e) => setNewVendor({ ...newVendor, price: e.target.value })} className="px-3 py-2 border border-stone-200 bg-white" />
                   </div>
-                  <textarea placeholder="Catatan" value={newVendor.notes} onChange={(e) => setNewVendor({ ...newVendor, notes: e.target.value })} rows="2" className="w-full px-3 py-2 border border-stone-200 bg-white resize-none" />
+                  <textarea placeholder="Catatan&#10;(Enter untuk baris baru)" value={newVendor.notes} onChange={(e) => setNewVendor({ ...newVendor, notes: e.target.value })} rows="4" className="w-full px-3 py-2 border border-stone-200 bg-white resize-y" />
                 </div>
                 <div className="flex gap-2 mt-4">
                   <button onClick={addVendor} className="px-5 py-2 bg-stone-900 text-stone-50 text-xs tracking-wider uppercase hover:bg-stone-800">Simpan</button>
@@ -1257,7 +1315,7 @@ export default function WeddingPlanner() {
                     </div>
                     {v.contact && <p className="text-xs text-stone-600 mt-1"><Phone className="w-3 h-3 inline mr-1" />{v.contact}</p>}
                     {v.price > 0 && <p className="serif text-lg mt-2">{formatRupiah(v.price)}</p>}
-                    {v.notes && <p className="text-xs text-stone-500 italic mt-2">{v.notes}</p>}
+                    {v.notes && <p className="text-xs text-stone-500 italic mt-2 whitespace-pre-line">{v.notes}</p>}
                     <div className="flex gap-1 mt-3">
                       {["Negosiasi", "Booked", "Lunas"].map(status => (
                         <button key={status} onClick={() => updateVendorStatus(v.id, status)} className={`flex-1 text-xs py-1.5 transition-colors ${v.status === status ? "bg-stone-900 text-stone-50" : "bg-stone-100 text-stone-600 hover:bg-stone-200"}`}>
