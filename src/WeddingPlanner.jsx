@@ -635,7 +635,7 @@ export default function WeddingPlanner() {
         <div className="max-w-5xl mx-auto px-6 py-10 sm:py-14 text-center">
           <p className="text-xs tracking-[0.3em] uppercase text-stone-500 mb-4">Wedding Planner</p>
           <h1 className="serif text-3xl sm:text-5xl font-light text-stone-900 italic">
-            Rinaldi <span className="text-stone-400 not-italic mx-2">&</span> Naura Syifa
+            Naura Syifa <span className="text-stone-400 not-italic mx-2">&</span> Rinaldi
           </h1>
           {daysUntil !== null && daysUntil >= 0 && (
             <p className="text-xs tracking-widest uppercase text-stone-500 mt-6">
@@ -1952,7 +1952,7 @@ export default function WeddingPlanner() {
       </main>
 
       <footer className="text-center py-10 mt-8 border-t border-stone-200">
-        <p className="text-xs tracking-[0.3em] uppercase text-stone-400">Rinaldi & Naura Syifa</p>
+        <p className="text-xs tracking-[0.3em] uppercase text-stone-400">Naura & Rinaldi</p>
       </footer>
     </div>
   );
